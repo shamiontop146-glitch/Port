@@ -1,0 +1,534 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RemoteEvents = ReplicatedStorage:WaitForChild("RemoteEvents")
+local MatchEnd = RemoteEvents:WaitForChild("MatchEnd")
+local RoundEnd = RemoteEvents:WaitForChild("RoundEnd")
+local MatchTeamAssigned = RemoteEvents:WaitForChild("MatchTeamAssigned")
+local ScoreUpdate = RemoteEvents:WaitForChild("ScoreUpdate")
+local PreMatchCountdown = RemoteEvents:WaitForChild("PreMatchCountdown")
+local MatchStart = RemoteEvents:WaitForChild("MatchStart")
+
+local BindableEvents = ReplicatedStorage:WaitForChild("BindableEvents")
+local MatchReady = BindableEvents:WaitForChild("MatchReady")
+local MatchFinished = BindableEvents:WaitForChild("MatchFinished")
+
+local ROUNDS_TO_WIN = 3
+local ROUND_RESET_DELAY = 3
+local PRE_MATCH_COUNTDOWN = 5
+local MATCH_END_DELAY = 3
+
+local matchPlayer1, matchPlayer2 = nil, nil
+local redPlayer, bluePlayer = nil, nil
+local player1Score, player2Score = 0, 0
+local matchActive = false
+local roundActive = false
+local roundTransitionRunning = false
+local startingRound = false
+local matchEndTransitionRunning = false
+local player1DeathConnection, player2DeathConnection = nil, nil
+local matchGeneration = 0
+
+local function setRoundActive(enabled)
+	roundActive = enabled
+
+	if matchPlayer1 and matchPlayer1.Parent then
+		matchPlayer1:SetAttribute("RoundActive", enabled)
+	end
+
+	if matchPlayer2 and matchPlayer2.Parent then
+		matchPlayer2:SetAttribute("RoundActive", enabled)
+	end
+end
+
+local function setCombatEnabled(enabled)
+	if matchPlayer1 and matchPlayer1.Parent then
+		matchPlayer1:SetAttribute("CombatEnabled", enabled)
+	end
+
+	if matchPlayer2 and matchPlayer2.Parent then
+		matchPlayer2:SetAttribute("CombatEnabled", enabled)
+	end
+end
+
+local function setRoundState(enabled)
+	setRoundActive(enabled)
+	setCombatEnabled(enabled)
+end
+
+local function getCurrentArena()
+	if not matchPlayer1 then return nil end
+
+	local arenaName = matchPlayer1:GetAttribute("CurrentArenaName")
+	if not arenaName then return nil end
+
+	local arenasFolder = workspace:FindFirstChild("Arenas")
+	if not arenasFolder then return nil end
+
+	return arenasFolder:FindFirstChild(arenaName)
+end
+
+local function getPlayerSpawn(player)
+	local arena = getCurrentArena()
+	if not arena then return nil end
+
+	if player == matchPlayer1 then
+		return arena:FindFirstChild("Spawn1")
+	elseif player == matchPlayer2 then
+		return arena:FindFirstChild("Spawn2")
+	end
+
+	return nil
+end
+
+local function getLobbySpawn()
+	return workspace:FindFirstChild("SpawnPart")
+end
+
+local function teleportPlayerToLobby(player)
+	if not player or not player.Parent then return false end
+
+	local spawnPart = getLobbySpawn()
+	if not spawnPart then return false end
+
+	local character = player.Character
+	if not character then return false end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+
+	if not humanoid or not root or humanoid.Health <= 0 then
+		return false
+	end
+
+	character:PivotTo(spawnPart.CFrame + Vector3.new(0, 3, 0))
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	return true
+end
+
+local function teleportPlayerToArena(player)
+	if not player or not player.Parent then return false end
+
+	local spawnPart = getPlayerSpawn(player)
+	if not spawnPart then return false end
+
+	local character = player.Character
+	if not character then return false end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+
+	if not humanoid or not root or humanoid.Health <= 0 then
+		return false
+	end
+
+	character:PivotTo(spawnPart.CFrame + Vector3.new(0, 3, 0))
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	return true
+end
+
+local function respawnPlayerAtArena(player)
+	if not player or not player.Parent then return false end
+
+	local spawnPart = getPlayerSpawn(player)
+	if not spawnPart then return false end
+
+	local oldCharacter = player.Character
+	local newCharacter
+	local characterAddedConnection
+
+	characterAddedConnection = player.CharacterAdded:Connect(function(character)
+		if character ~= oldCharacter then
+			newCharacter = character
+		end
+	end)
+
+	local loadSuccess = pcall(function()
+		player:LoadCharacter()
+	end)
+
+	if not loadSuccess then
+		characterAddedConnection:Disconnect()
+		return false
+	end
+
+	local startTime = os.clock()
+
+	while not newCharacter and player.Parent and os.clock() - startTime < 10 do
+		if player.Character and player.Character ~= oldCharacter then
+			newCharacter = player.Character
+			break
+		end
+		task.wait()
+	end
+
+	characterAddedConnection:Disconnect()
+
+	if not newCharacter then return false end
+
+	local root = newCharacter:WaitForChild("HumanoidRootPart", 10)
+	local humanoid = newCharacter:WaitForChild("Humanoid", 10)
+
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	newCharacter:PivotTo(spawnPart.CFrame + Vector3.new(0, 3, 0))
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	return true
+end
+
+local function updateScoreGUI()
+	if redPlayer and redPlayer.Parent then
+		ScoreUpdate:FireClient(redPlayer, player1Score, player2Score)
+	end
+
+	if bluePlayer and bluePlayer.Parent then
+		ScoreUpdate:FireClient(bluePlayer, player1Score, player2Score)
+	end
+end
+
+local function sendRoundResult(winner)
+	if not winner then return end
+
+	local loser
+
+	if winner == matchPlayer1 then
+		loser = matchPlayer2
+	elseif winner == matchPlayer2 then
+		loser = matchPlayer1
+	else
+		return
+	end
+
+	if winner.Parent then
+		RoundEnd:FireClient(winner, "Won")
+	end
+
+	if loser and loser.Parent then
+		RoundEnd:FireClient(loser, "Lost")
+	end
+end
+
+local function sendMatchResult(winner)
+	if not winner then return end
+
+	local loser
+
+	if winner == matchPlayer1 then
+		loser = matchPlayer2
+	elseif winner == matchPlayer2 then
+		loser = matchPlayer1
+	else
+		return
+	end
+
+	if winner.Parent then
+		MatchEnd:FireClient(winner, "Won")
+	end
+
+	if loser and loser.Parent then
+		MatchEnd:FireClient(loser, "Lost")
+	end
+end
+
+local function disconnectDeathConnections()
+	if player1DeathConnection then
+		player1DeathConnection:Disconnect()
+		player1DeathConnection = nil
+	end
+
+	if player2DeathConnection then
+		player2DeathConnection:Disconnect()
+		player2DeathConnection = nil
+	end
+end
+
+local playerDied
+local connectDeathConnections
+local roundWon
+
+local function startRoundCountdown(generation)
+	if startingRound or generation ~= matchGeneration or not matchActive then
+		return
+	end
+
+	if not matchPlayer1 or not matchPlayer2 then return end
+	if not matchPlayer1.Parent or not matchPlayer2.Parent then return end
+
+	startingRound = true
+	setRoundState(false)
+	disconnectDeathConnections()
+
+	PreMatchCountdown:FireClient(matchPlayer1)
+	PreMatchCountdown:FireClient(matchPlayer2)
+
+	task.wait(PRE_MATCH_COUNTDOWN)
+
+	if generation ~= matchGeneration or not matchActive then
+		startingRound = false
+		return
+	end
+
+	if not matchPlayer1 or not matchPlayer2 or not matchPlayer1.Parent or not matchPlayer2.Parent then
+		startingRound = false
+		return
+	end
+
+	connectDeathConnections()
+	setRoundState(true)
+
+	MatchStart:FireClient(matchPlayer1)
+	MatchStart:FireClient(matchPlayer2)
+
+	startingRound = false
+end
+
+connectDeathConnections = function()
+	disconnectDeathConnections()
+
+	if matchPlayer1 and matchPlayer1.Parent then
+		local character = matchPlayer1.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+		if humanoid then
+			player1DeathConnection = humanoid.Died:Connect(function()
+				if matchActive and roundActive then
+					playerDied(matchPlayer1)
+				end
+			end)
+		end
+	end
+
+	if matchPlayer2 and matchPlayer2.Parent then
+		local character = matchPlayer2.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+		if humanoid then
+			player2DeathConnection = humanoid.Died:Connect(function()
+				if matchActive and roundActive then
+					playerDied(matchPlayer2)
+				end
+			end)
+		end
+	end
+end
+
+local function startNextRound(generation)
+	if generation ~= matchGeneration or not matchActive then return end
+	if not matchPlayer1 or not matchPlayer2 then return end
+	if not matchPlayer1.Parent or not matchPlayer2.Parent then return end
+
+	setRoundState(false)
+	task.wait(ROUND_RESET_DELAY)
+
+	if generation ~= matchGeneration or not matchActive then return end
+	if not matchPlayer1 or not matchPlayer2 then return end
+	if not matchPlayer1.Parent or not matchPlayer2.Parent then return end
+
+	local player1Respawned = respawnPlayerAtArena(matchPlayer1)
+
+	if generation ~= matchGeneration or not matchActive then return end
+	if not matchPlayer1 or not matchPlayer2 then return end
+	if not matchPlayer1.Parent or not matchPlayer2.Parent then return end
+
+	local player2Respawned = respawnPlayerAtArena(matchPlayer2)
+
+	if not player1Respawned or not player2Respawned then
+		return
+	end
+
+	task.wait(0.25)
+
+	if generation ~= matchGeneration or not matchActive then return end
+
+	startRoundCountdown(generation)
+end
+
+local function endMatch(winner)
+	if not matchActive or matchEndTransitionRunning then return end
+	if winner ~= matchPlayer1 and winner ~= matchPlayer2 then return end
+
+	matchEndTransitionRunning = true
+
+	local finishedPlayer1 = matchPlayer1
+	local finishedPlayer2 = matchPlayer2
+	local finishedArena = getCurrentArena()
+	local endingGeneration = matchGeneration
+
+	matchGeneration += 1
+	matchActive = false
+	startingRound = false
+	roundTransitionRunning = false
+
+	setRoundState(false)
+	disconnectDeathConnections()
+	sendMatchResult(winner)
+
+	task.spawn(function()
+		task.wait(MATCH_END_DELAY)
+
+		if matchGeneration ~= endingGeneration + 1 then
+			return
+		end
+
+		if finishedPlayer1 and finishedPlayer1.Parent then
+			teleportPlayerToLobby(finishedPlayer1)
+		end
+
+		if finishedPlayer2 and finishedPlayer2.Parent then
+			teleportPlayerToLobby(finishedPlayer2)
+		end
+
+		MatchFinished:Fire(finishedPlayer1, finishedPlayer2, finishedArena)
+
+		matchPlayer1 = nil
+		matchPlayer2 = nil
+		redPlayer = nil
+		bluePlayer = nil
+		player1Score = 0
+		player2Score = 0
+		matchEndTransitionRunning = false
+	end)
+end
+
+roundWon = function(winner)
+	if not matchActive or not roundActive then return end
+
+	setRoundState(false)
+	disconnectDeathConnections()
+
+	if winner == matchPlayer1 then
+		player1Score += 1
+	elseif winner == matchPlayer2 then
+		player2Score += 1
+	else
+		return
+	end
+
+	sendRoundResult(winner)
+	updateScoreGUI()
+
+	if player1Score >= ROUNDS_TO_WIN then
+		endMatch(matchPlayer1)
+		return
+	end
+
+	if player2Score >= ROUNDS_TO_WIN then
+		endMatch(matchPlayer2)
+		return
+	end
+
+	if roundTransitionRunning then return end
+
+	roundTransitionRunning = true
+	local generation = matchGeneration
+
+	task.spawn(function()
+		startNextRound(generation)
+
+		if generation == matchGeneration and matchActive then
+			roundTransitionRunning = false
+		end
+	end)
+end
+
+playerDied = function(deadPlayer)
+	if not matchActive or not roundActive then return end
+
+	local winner
+
+	if deadPlayer == matchPlayer1 then
+		winner = matchPlayer2
+	elseif deadPlayer == matchPlayer2 then
+		winner = matchPlayer1
+	else
+		return
+	end
+
+	if not winner or not winner.Parent then return end
+
+	roundWon(winner)
+end
+
+MatchReady.Event:Connect(function(player1, player2)
+	if not player1 or not player2 then return end
+	if matchActive or matchEndTransitionRunning then return end
+	if not player1.Parent or not player2.Parent then return end
+
+	matchPlayer1 = player1
+	matchPlayer2 = player2
+	redPlayer = player1
+	bluePlayer = player2
+	player1Score = 0
+	player2Score = 0
+	matchEndTransitionRunning = false
+
+	matchGeneration += 1
+	local generation = matchGeneration
+
+	matchActive = true
+	setRoundState(false)
+	startingRound = false
+	roundTransitionRunning = false
+
+	MatchTeamAssigned:FireClient(redPlayer, "Red", redPlayer.UserId, bluePlayer.UserId)
+	MatchTeamAssigned:FireClient(bluePlayer, "Blue", redPlayer.UserId, bluePlayer.UserId)
+
+	updateScoreGUI()
+
+	task.spawn(function()
+		startRoundCountdown(generation)
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	if player ~= matchPlayer1 and player ~= matchPlayer2 then
+		return
+	end
+
+	if not matchActive then
+		return
+	end
+
+	local remainingPlayer
+
+	if player == matchPlayer1 then
+		remainingPlayer = matchPlayer2
+	else
+		remainingPlayer = matchPlayer1
+	end
+
+	local finishedPlayer1 = matchPlayer1
+	local finishedPlayer2 = matchPlayer2
+	local finishedArena = getCurrentArena()
+
+	matchGeneration += 1
+	matchActive = false
+	startingRound = false
+	roundTransitionRunning = false
+	matchEndTransitionRunning = true
+
+	setRoundState(false)
+	disconnectDeathConnections()
+
+	if remainingPlayer and remainingPlayer.Parent then
+		MatchEnd:FireClient(remainingPlayer, "Won")
+	end
+
+	MatchFinished:Fire(finishedPlayer1, finishedPlayer2, finishedArena)
+
+	matchPlayer1 = nil
+	matchPlayer2 = nil
+	redPlayer = nil
+	bluePlayer = nil
+	player1Score = 0
+	player2Score = 0
+	matchEndTransitionRunning = false
+end)
