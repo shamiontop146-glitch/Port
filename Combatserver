@@ -1,0 +1,154 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
+
+local RemoteEvents = ReplicatedStorage:WaitForChild("RemoteEvents")
+local PunchRemote = RemoteEvents:WaitForChild("Punch")
+local HitReaction = RemoteEvents:WaitForChild("HitReaction")
+local StunRemote = RemoteEvents:WaitForChild("Stun")
+local Knockback = RemoteEvents:WaitForChild("Knockback")
+local BlockRemote = RemoteEvents:WaitForChild("Block")
+
+local CombatManager = require(ReplicatedStorage.Modules.CombatManager)
+
+local DAMAGE = 10
+local BLOCK_DAMAGE_MULTIPLIER = 0.25
+local ATTACK_STATE_DURATION = 0.30
+local HITBOX_SIZE = Vector3.new(5, 5, 5)
+local HITBOX_OFFSET = CFrame.new(0, 0, -3)
+local KNOCKBACK_FORCE = 25
+local KNOCKBACK_UPWARD_FORCE = 8
+local KNOCKBACK_DURATION = 0.2
+
+local hitAnimations = {"Hit1", "Hit2", "Hit3"}
+
+local stunTimes = {
+	[1] = 0.12,
+	[2] = 0.12,
+	[3] = 0.15,
+	[4] = 0.8
+}
+
+BlockRemote.OnServerEvent:Connect(function(player, isBlocking)
+	if typeof(isBlocking) ~= "boolean" then
+		return
+	end
+
+	if isBlocking then
+		if CombatManager.GetState(player) ~= "Idle" then
+			return
+		end
+
+		if CombatManager.IsStunned(player) then
+			return
+		end
+
+		CombatManager.SetState(player, "Blocking")
+		return
+	end
+
+	if CombatManager.GetState(player) == "Blocking" then
+		CombatManager.SetState(player, "Idle")
+	end
+end)
+
+PunchRemote.OnServerEvent:Connect(function(player, combo)
+	if typeof(combo) ~= "number" then
+		return
+	end
+
+	combo = math.floor(combo)
+
+	if combo < 1 or combo > 4 then
+		return
+	end
+
+	if CombatManager.GetState(player) ~= "Idle" then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return
+	end
+
+	CombatManager.SetState(player, "Attacking")
+
+	local hitboxCFrame = root.CFrame * HITBOX_OFFSET
+	local parts = workspace:GetPartBoundsInBox(hitboxCFrame, HITBOX_SIZE)
+	local alreadyHit = {}
+
+	for _, part in ipairs(parts) do
+		local enemyCharacter = part:FindFirstAncestorOfClass("Model")
+
+		if enemyCharacter and enemyCharacter ~= character and not alreadyHit[enemyCharacter] then
+			local enemyHumanoid = enemyCharacter:FindFirstChild("Humanoid")
+
+			if enemyHumanoid and enemyHumanoid.Health > 0 then
+				alreadyHit[enemyCharacter] = true
+
+				local enemyPlayer = Players:GetPlayerFromCharacter(enemyCharacter)
+				local enemyBlocking = enemyPlayer and CombatManager.GetState(enemyPlayer) == "Blocking"
+
+				if enemyBlocking then
+					enemyHumanoid:TakeDamage(DAMAGE * BLOCK_DAMAGE_MULTIPLIER)
+					continue
+				end
+
+				enemyHumanoid:TakeDamage(DAMAGE)
+
+				if enemyPlayer then
+					local randomHit = hitAnimations[math.random(1, #hitAnimations)]
+					HitReaction:FireClient(enemyPlayer, randomHit)
+
+					local stunDuration = stunTimes[combo] or 0.12
+					local stunned = CombatManager.ApplyStun(enemyPlayer, stunDuration)
+
+					if stunned then
+						StunRemote:FireClient(enemyPlayer, stunDuration)
+					end
+
+					if combo == 4 then
+						local enemyRoot = enemyCharacter:FindFirstChild("HumanoidRootPart")
+
+						if enemyRoot then
+							local offset = enemyRoot.Position - root.Position
+
+							if offset.Magnitude > 0 then
+								local direction = offset.Unit
+								local bodyVelocity = Instance.new("BodyVelocity")
+
+								bodyVelocity.MaxForce = Vector3.new(100000, 100000, 100000)
+								bodyVelocity.Velocity = direction * KNOCKBACK_FORCE + Vector3.new(0, KNOCKBACK_UPWARD_FORCE, 0)
+								bodyVelocity.Parent = enemyRoot
+
+								Debris:AddItem(bodyVelocity, KNOCKBACK_DURATION)
+							end
+						end
+
+						Knockback:FireClient(enemyPlayer)
+					end
+				end
+			end
+		end
+	end
+
+	task.delay(ATTACK_STATE_DURATION, function()
+		if not player.Parent then
+			return
+		end
+
+		if CombatManager.GetState(player) == "Attacking" then
+			CombatManager.SetState(player, "Idle")
+		end
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	CombatManager.RemovePlayer(player)
+end)
