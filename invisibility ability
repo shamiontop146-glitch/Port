@@ -1,0 +1,382 @@
+--!strict
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local INVISIBILITY_DURATION = 5
+local LOCAL_TRANSPARENCY = 0.55
+
+local FADE_OUT_TIME = 0.28
+local FADE_IN_TIME = 0.22
+
+local SHIMMER_IN_TIME = 0.08
+local SHIMMER_OUT_TIME = 0.14
+
+local activeConnections: {[Model]: {RBXScriptConnection}} = {}
+local activeHighlights: {[Model]: Highlight} = {}
+
+local function getCharacterParts(character: Model): {BasePart}
+	local parts: {BasePart} = {}
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, descendant)
+		end
+	end
+
+	return parts
+end
+
+local function saveOriginalTransparency(character: Model)
+	for _, part in ipairs(getCharacterParts(character)) do
+		if part:GetAttribute("InvisibilityOriginalTransparency") == nil then
+			part:SetAttribute(
+				"InvisibilityOriginalTransparency",
+				part.Transparency
+			)
+		end
+	end
+end
+
+local function createShimmer(character: Model): Highlight
+	local existing = activeHighlights[character]
+
+	if existing then
+		existing:Destroy()
+		activeHighlights[character] = nil
+	end
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "InvisibilityShimmer"
+	highlight.Adornee = character
+	highlight.FillColor = Color3.fromRGB(185, 235, 255)
+	highlight.OutlineColor = Color3.fromRGB(220, 250, 255)
+	highlight.FillTransparency = 1
+	highlight.OutlineTransparency = 1
+	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+	highlight.Parent = character
+
+	activeHighlights[character] = highlight
+
+	return highlight
+end
+
+local function removeShimmer(character: Model)
+	local highlight = activeHighlights[character]
+
+	if highlight then
+		highlight:Destroy()
+		activeHighlights[character] = nil
+	end
+end
+
+local function playShimmer(character: Model)
+	if not character.Parent then
+		return
+	end
+
+	local highlight = createShimmer(character)
+
+	local shimmerIn = TweenService:Create(
+		highlight,
+		TweenInfo.new(
+			SHIMMER_IN_TIME,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		),
+		{
+			FillTransparency = 0.78,
+			OutlineTransparency = 0.12
+		}
+	)
+
+	local shimmerOut = TweenService:Create(
+		highlight,
+		TweenInfo.new(
+			SHIMMER_OUT_TIME,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		),
+		{
+			FillTransparency = 1,
+			OutlineTransparency = 1
+		}
+	)
+
+	shimmerIn:Play()
+
+	shimmerIn.Completed:Connect(function()
+		if highlight.Parent and activeHighlights[character] == highlight then
+			shimmerOut:Play()
+		end
+	end)
+
+	shimmerOut.Completed:Connect(function()
+		if activeHighlights[character] == highlight then
+			removeShimmer(character)
+		end
+	end)
+end
+
+local function tweenCharacterTransparency(
+	character: Model,
+	targetTransparency: number,
+	duration: number
+)
+	if not character.Parent then
+		return
+	end
+
+	saveOriginalTransparency(character)
+
+	local tweenInfo = TweenInfo.new(
+		duration,
+		Enum.EasingStyle.Quad,
+		Enum.EasingDirection.Out
+	)
+
+	for _, part in ipairs(getCharacterParts(character)) do
+		TweenService:Create(
+			part,
+			tweenInfo,
+			{
+				Transparency = targetTransparency
+			}
+		):Play()
+	end
+end
+
+local function restoreCharacterTransparency(character: Model)
+	if not character.Parent then
+		return
+	end
+
+	local tweenInfo = TweenInfo.new(
+		FADE_IN_TIME,
+		Enum.EasingStyle.Quad,
+		Enum.EasingDirection.Out
+	)
+
+	local restoreCount = 0
+
+	for _, part in ipairs(getCharacterParts(character)) do
+		local originalTransparency =
+			part:GetAttribute("InvisibilityOriginalTransparency")
+
+		if typeof(originalTransparency) == "number" then
+			restoreCount += 1
+
+			TweenService:Create(
+				part,
+				tweenInfo,
+				{
+					Transparency = originalTransparency
+				}
+			):Play()
+		end
+	end
+
+	if restoreCount > 0 then
+		task.delay(FADE_IN_TIME, function()
+			if not character.Parent then
+				return
+			end
+
+			for _, part in ipairs(getCharacterParts(character)) do
+				part:SetAttribute(
+					"InvisibilityOriginalTransparency",
+					nil
+				)
+			end
+		end)
+	end
+end
+
+local function setLocalVisibility(character: Model)
+	tweenCharacterTransparency(
+		character,
+		LOCAL_TRANSPARENCY,
+		FADE_OUT_TIME
+	)
+end
+
+local function setRemoteVisibility(character: Model)
+	tweenCharacterTransparency(
+		character,
+		1,
+		FADE_OUT_TIME
+	)
+end
+
+local function cleanup(character: Model)
+	local connections = activeConnections[character]
+
+	if connections then
+		for _, connection in ipairs(connections) do
+			connection:Disconnect()
+		end
+
+		activeConnections[character] = nil
+	end
+
+	if character.Parent then
+		restoreCharacterTransparency(character)
+	end
+
+	removeShimmer(character)
+end
+
+local function activateClient(ctx: any): any
+	local character = ctx.character
+
+	if not character then
+		return {}
+	end
+
+	cleanup(character)
+
+	character:SetAttribute(
+		"LocalInvisibilityActive",
+		true
+	)
+
+	playShimmer(character)
+
+	setLocalVisibility(character)
+
+	local connections: {RBXScriptConnection} = {}
+
+	local function cleanupIfCharacterChanges()
+		if not character.Parent then
+			removeShimmer(character)
+			activeConnections[character] = nil
+		end
+	end
+
+	table.insert(
+		connections,
+		character.AncestryChanged:Connect(
+			cleanupIfCharacterChanges
+		)
+	)
+
+	activeConnections[character] = connections
+
+	task.delay(INVISIBILITY_DURATION, function()
+		if not character.Parent then
+			cleanup(character)
+			return
+		end
+
+		character:SetAttribute(
+			"LocalInvisibilityActive",
+			false
+		)
+
+		playShimmer(character)
+		cleanup(character)
+	end)
+
+	return {
+		duration = INVISIBILITY_DURATION,
+	}
+end
+
+local function activateServer(ctx: any)
+	local player = ctx.player
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass(
+		"Humanoid"
+	)
+
+	if not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	if character:GetAttribute(
+		"InvisibilityActive"
+		) == true then
+		return
+	end
+
+	character:SetAttribute(
+		"InvisibilityActive",
+		true
+	)
+
+	ctx.broadcast({
+		duration = INVISIBILITY_DURATION,
+	})
+
+	task.delay(INVISIBILITY_DURATION, function()
+		if not character.Parent then
+			return
+		end
+
+		character:SetAttribute(
+			"InvisibilityActive",
+			false
+		)
+	end)
+end
+
+local function onReplicate(ctx: any)
+	local actor = ctx.actor
+
+	if not actor or not actor:IsA("Player") then
+		return
+	end
+
+	local character = actor.Character
+
+	if not character then
+		return
+	end
+
+	local localPlayer = Players.LocalPlayer
+
+	if actor == localPlayer then
+		return
+	end
+
+	cleanup(character)
+
+	character:SetAttribute(
+		"RemoteInvisibilityActive",
+		true
+	)
+
+	playShimmer(character)
+
+	setRemoteVisibility(character)
+
+	task.delay(INVISIBILITY_DURATION, function()
+		if not character.Parent then
+			cleanup(character)
+			return
+		end
+
+		character:SetAttribute(
+			"RemoteInvisibilityActive",
+			false
+		)
+
+		playShimmer(character)
+		cleanup(character)
+	end)
+end
+
+return {
+	id = "Invisibility",
+	displayName = "Invisibility",
+	cooldown = 10,
+
+	activateClient = activateClient,
+	activateServer = activateServer,
+	onReplicate = onReplicate,
+}
