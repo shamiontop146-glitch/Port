@@ -1,0 +1,847 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+
+local RemoteEvents = ReplicatedStorage:WaitForChild("RemoteEvents")
+local UpdateAim = RemoteEvents:WaitForChild("UpdateAim")
+local UseAbility = RemoteEvents:WaitForChild("UseAbility")
+local AbilityStopped = RemoteEvents:WaitForChild("AbilityStopped")
+local LaserImpact = RemoteEvents:WaitForChild("LaserImpact")
+
+local AnimationsFolder = ReplicatedStorage:WaitForChild("Animations")
+local LaserEyesStart = AnimationsFolder:WaitForChild("LaserEyesStart")
+local LaserEyesLoop = AnimationsFolder:WaitForChild("LaserEyesLoop")
+
+local character
+local head
+local humanoid
+local rootPart
+local animator
+local laserStartAnimationTrack
+local laserLoopAnimationTrack
+
+local laserActive = false
+local laserVisualActive = false
+local laserOnCooldown = false
+local laserCooldownEndTime = 0
+
+local laserHitLocked = false
+local lockedHitPosition
+local lockedHitNormal
+
+local LASER_STARTUP_TIME = 0.67
+local laserStartupToken = 0
+
+local leftBeam
+local rightBeam
+local leftCoreBeam
+local rightCoreBeam
+local leftStartAttachment
+local rightStartAttachment
+local endAttachment
+local endPart
+
+local LASER_DURATION = 5
+local LASER_COOLDOWN = 5
+local LASER_MAX_DISTANCE = 1000
+
+local EYE_OFFSET_X = 0.22
+local EYE_OFFSET_Y = 0.05
+local EYE_OFFSET_Z = -0.5
+
+local BODY_TURN_SPEED = 10
+local AIM_UPDATE_INTERVAL = 0.05
+local aimUpdateTimer = 0
+local laserStartTime = 0
+
+local originalAutoRotate
+local autoRotateWasModified = false
+
+local ANIMATION_FADE_TIME = 0.1
+local ANIMATION_PLAYBACK_SPEED = 1
+
+local OUTER_BEAM_WIDTH_START = 0.24
+local OUTER_BEAM_WIDTH_END = 0.12
+local CORE_BEAM_WIDTH_START = 0.075
+local CORE_BEAM_WIDTH_END = 0.035
+
+local OUTER_RED = Color3.fromRGB(180, 0, 10)
+local OUTER_RED_BRIGHT = Color3.fromRGB(255, 25, 35)
+local CORE_WHITE = Color3.fromRGB(255, 255, 255)
+local CORE_WHITE_RED = Color3.fromRGB(255, 220, 220)
+
+local IMPACT_SPARK_COUNT = 28
+local IMPACT_SPARK_LIFETIME_MIN = 0.08
+local IMPACT_SPARK_LIFETIME_MAX = 0.22
+local IMPACT_SPARK_SPEED_MIN = 10
+local IMPACT_SPARK_SPEED_MAX = 24
+local IMPACT_SPARK_DRAG = 6
+local IMPACT_SPARK_SPREAD = 35
+
+local IMPACT_FLASH_SIZE = 2.2
+local IMPACT_FLASH_DURATION = 0.1
+local IMPACT_GLOW_SIZE = 1.5
+local IMPACT_GLOW_LIFETIME = 0.16
+local IMPACT_LIGHT_BRIGHTNESS = 7
+local IMPACT_LIGHT_RANGE = 8
+
+local IMPACT_RING_SIZE = 0.2
+local IMPACT_RING_FINAL_SIZE = 4
+local IMPACT_RING_DURATION = 0.2
+
+local IMPACT_DEBRIS_COUNT = 8
+local IMPACT_DEBRIS_SIZE_MIN = 0.035
+local IMPACT_DEBRIS_SIZE_MAX = 0.09
+local IMPACT_DEBRIS_SPEED_MIN = 8
+local IMPACT_DEBRIS_SPEED_MAX = 16
+local IMPACT_DEBRIS_LIFETIME = 0.25
+
+local LASER_TEXTURE = ""
+local LASER_TEXTURE_SPEED = 5
+
+local lastImpactPosition
+local lastImpactTime = 0
+
+local function isRoundActive()
+	return player and player.Parent and player:GetAttribute("RoundActive") == true
+end
+
+local function isPlayerInArena()
+	if not player or not player.Parent or player:GetAttribute("InMatch") ~= true then
+		return false
+	end
+
+	local arenaName = player:GetAttribute("CurrentArenaName")
+	if typeof(arenaName) ~= "string" or arenaName == "" then
+		return false
+	end
+
+	local arenasFolder = workspace:FindFirstChild("Arenas")
+	if not arenasFolder then
+		return false
+	end
+
+	return arenasFolder:FindFirstChild(arenaName) ~= nil
+end
+
+local function disableAutoRotate()
+	if not humanoid or autoRotateWasModified then
+		return
+	end
+
+	originalAutoRotate = humanoid.AutoRotate
+	autoRotateWasModified = true
+	humanoid.AutoRotate = false
+end
+
+local function restoreAutoRotate()
+	if not humanoid then
+		originalAutoRotate = nil
+		autoRotateWasModified = false
+		return
+	end
+
+	if not autoRotateWasModified then
+		return
+	end
+
+	humanoid.AutoRotate = originalAutoRotate ~= nil and originalAutoRotate or true
+	originalAutoRotate = nil
+	autoRotateWasModified = false
+end
+
+local function stopLaserStartAnimation()
+	if laserStartAnimationTrack then
+		if laserStartAnimationTrack.IsPlaying then
+			laserStartAnimationTrack:Stop(ANIMATION_FADE_TIME)
+		end
+		laserStartAnimationTrack = nil
+	end
+end
+
+local function stopLaserLoopAnimation()
+	if laserLoopAnimationTrack then
+		if laserLoopAnimationTrack.IsPlaying then
+			laserLoopAnimationTrack:Stop(ANIMATION_FADE_TIME)
+		end
+		laserLoopAnimationTrack = nil
+	end
+end
+
+local function playLaserStartAnimation()
+	if not isRoundActive() or not LaserEyesStart:IsA("Animation") or LaserEyesStart.AnimationId == "" or not humanoid then
+		return false
+	end
+
+	animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator")
+	animator.Parent = humanoid
+
+	stopLaserStartAnimation()
+
+	local success, track = pcall(function()
+		return animator:LoadAnimation(LaserEyesStart)
+	end)
+
+	if not success then
+		return false
+	end
+
+	laserStartAnimationTrack = track
+	laserStartAnimationTrack.Priority = Enum.AnimationPriority.Action
+	laserStartAnimationTrack.Looped = false
+
+	if not isRoundActive() then
+		stopLaserStartAnimation()
+		return false
+	end
+
+	laserStartAnimationTrack:Play(ANIMATION_FADE_TIME, 1, ANIMATION_PLAYBACK_SPEED)
+	return true
+end
+
+local function playLaserLoopAnimation()
+	if not isRoundActive() or not laserActive or not LaserEyesLoop:IsA("Animation") or LaserEyesLoop.AnimationId == "" or not humanoid then
+		return false
+	end
+
+	animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator")
+	animator.Parent = humanoid
+
+	stopLaserLoopAnimation()
+
+	local success, track = pcall(function()
+		return animator:LoadAnimation(LaserEyesLoop)
+	end)
+
+	if not success then
+		return false
+	end
+
+	laserLoopAnimationTrack = track
+	laserLoopAnimationTrack.Priority = Enum.AnimationPriority.Action
+	laserLoopAnimationTrack.Looped = true
+
+	if not isRoundActive() or not laserActive then
+		stopLaserLoopAnimation()
+		return false
+	end
+
+	laserLoopAnimationTrack:Play(ANIMATION_FADE_TIME, 1, ANIMATION_PLAYBACK_SPEED)
+	return true
+end
+
+local function stopLaserAnimations()
+	stopLaserStartAnimation()
+	stopLaserLoopAnimation()
+end
+
+local function cleanupLaserObjects()
+	if leftBeam then leftBeam:Destroy() leftBeam = nil end
+	if rightBeam then rightBeam:Destroy() rightBeam = nil end
+	if leftCoreBeam then leftCoreBeam:Destroy() leftCoreBeam = nil end
+	if rightCoreBeam then rightCoreBeam:Destroy() rightCoreBeam = nil end
+	if leftStartAttachment then leftStartAttachment:Destroy() leftStartAttachment = nil end
+	if rightStartAttachment then rightStartAttachment:Destroy() rightStartAttachment = nil end
+	if endAttachment then endAttachment:Destroy() endAttachment = nil end
+	if endPart then endPart:Destroy() endPart = nil end
+
+	laserHitLocked = false
+	lockedHitPosition = nil
+	lockedHitNormal = nil
+	lastImpactPosition = nil
+	lastImpactTime = 0
+end
+
+local function startLocalCooldown()
+	laserOnCooldown = true
+	laserCooldownEndTime = os.clock() + LASER_COOLDOWN
+end
+
+local function isLocalCooldownActive()
+	if not laserOnCooldown then
+		return false
+	end
+
+	if os.clock() >= laserCooldownEndTime then
+		laserOnCooldown = false
+		laserCooldownEndTime = 0
+		return false
+	end
+
+	return true
+end
+
+local function removeLaserEyes(startCooldown)
+	laserActive = false
+	laserVisualActive = false
+	laserStartupToken += 1
+	aimUpdateTimer = 0
+	laserStartTime = 0
+
+	stopLaserAnimations()
+	cleanupLaserObjects()
+	restoreAutoRotate()
+
+	if startCooldown then
+		startLocalCooldown()
+	end
+end
+
+local function setupCharacter(newCharacter)
+	restoreAutoRotate()
+
+	laserActive = false
+	laserVisualActive = false
+	laserStartupToken += 1
+	laserStartTime = 0
+	aimUpdateTimer = 0
+
+	stopLaserAnimations()
+	cleanupLaserObjects()
+
+	character = newCharacter
+	humanoid = newCharacter:WaitForChild("Humanoid")
+	head = newCharacter:WaitForChild("Head")
+	rootPart = newCharacter:WaitForChild("HumanoidRootPart")
+
+	animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator")
+	animator.Parent = humanoid
+
+	laserStartAnimationTrack = nil
+	laserLoopAnimationTrack = nil
+	originalAutoRotate = nil
+	autoRotateWasModified = false
+end
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+local function createImpactVFX(position, normal)
+	if not isRoundActive() or typeof(position) ~= "Vector3" then
+		return
+	end
+
+	if typeof(normal) ~= "Vector3" or normal.Magnitude <= 0.01 then
+		normal = Vector3.new(0, 1, 0)
+	else
+		normal = normal.Unit
+	end
+
+	local impactPart = Instance.new("Part")
+	impactPart.Name = "LaserImpactVFX"
+	impactPart.Size = Vector3.new(0.2, 0.2, 0.2)
+	impactPart.Transparency = 1
+	impactPart.Anchored = true
+	impactPart.CanCollide = false
+	impactPart.CanTouch = false
+	impactPart.CanQuery = false
+	impactPart.CastShadow = false
+	impactPart.Position = position
+	impactPart.Parent = workspace
+
+	local forward = normal
+	local right = forward:Cross(Vector3.new(0, 1, 0))
+
+	if right.Magnitude <= 0.01 then
+		right = forward:Cross(Vector3.new(1, 0, 0))
+	end
+
+	right = right.Unit
+	local up = right:Cross(forward).Unit
+
+	impactPart.CFrame = CFrame.fromMatrix(position, right, up, -forward)
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "LaserImpactAttachment"
+	attachment.Parent = impactPart
+
+	local sparks = Instance.new("ParticleEmitter")
+	sparks.Name = "LaserHitSparks"
+	sparks.Enabled = false
+	sparks.Rate = 0
+	sparks.Lifetime = NumberRange.new(IMPACT_SPARK_LIFETIME_MIN, IMPACT_SPARK_LIFETIME_MAX)
+	sparks.Speed = NumberRange.new(IMPACT_SPARK_SPEED_MIN, IMPACT_SPARK_SPEED_MAX)
+	sparks.Drag = IMPACT_SPARK_DRAG
+	sparks.SpreadAngle = Vector2.new(IMPACT_SPARK_SPREAD, IMPACT_SPARK_SPREAD)
+	sparks.Rotation = NumberRange.new(0, 360)
+	sparks.RotSpeed = NumberRange.new(-360, 360)
+	sparks.EmissionDirection = Enum.NormalId.Front
+	sparks.Shape = Enum.ParticleEmitterShape.Disc
+	sparks.ShapeInOut = Enum.ParticleEmitterShapeInOut.Outward
+	sparks.ShapeStyle = Enum.ParticleEmitterShapeStyle.Volume
+	sparks.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.14),
+		NumberSequenceKeypoint.new(0.12, 0.11),
+		NumberSequenceKeypoint.new(0.45, 0.07),
+		NumberSequenceKeypoint.new(1, 0)
+	})
+	sparks.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(0.65, 0.15),
+		NumberSequenceKeypoint.new(1, 1)
+	})
+	sparks.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, CORE_WHITE),
+		ColorSequenceKeypoint.new(0.2, CORE_WHITE),
+		ColorSequenceKeypoint.new(0.45, OUTER_RED_BRIGHT),
+		ColorSequenceKeypoint.new(1, OUTER_RED)
+	})
+	sparks.LightEmission = 1
+	sparks.LightInfluence = 0
+	sparks.Parent = attachment
+
+	local glow = Instance.new("ParticleEmitter")
+	glow.Name = "LaserHitGlow"
+	glow.Enabled = false
+	glow.Rate = 0
+	glow.Lifetime = NumberRange.new(0.08, IMPACT_GLOW_LIFETIME)
+	glow.Speed = NumberRange.new(0, 0)
+	glow.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.15),
+		NumberSequenceKeypoint.new(0.15, IMPACT_GLOW_SIZE),
+		NumberSequenceKeypoint.new(0.5, IMPACT_GLOW_SIZE * 0.65),
+		NumberSequenceKeypoint.new(1, 0)
+	})
+	glow.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.05),
+		NumberSequenceKeypoint.new(0.4, 0.25),
+		NumberSequenceKeypoint.new(1, 1)
+	})
+	glow.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, CORE_WHITE),
+		ColorSequenceKeypoint.new(0.3, OUTER_RED_BRIGHT),
+		ColorSequenceKeypoint.new(1, OUTER_RED)
+	})
+	glow.LightEmission = 1
+	glow.LightInfluence = 0
+	glow.Parent = attachment
+
+	local flash = Instance.new("ParticleEmitter")
+	flash.Name = "LaserHitFlash"
+	flash.Enabled = false
+	flash.Rate = 0
+	flash.Lifetime = NumberRange.new(IMPACT_FLASH_DURATION)
+	flash.Speed = NumberRange.new(0, 0)
+	flash.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.1),
+		NumberSequenceKeypoint.new(0.12, IMPACT_FLASH_SIZE),
+		NumberSequenceKeypoint.new(0.35, IMPACT_FLASH_SIZE * 0.7),
+		NumberSequenceKeypoint.new(1, 0)
+	})
+	flash.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(0.35, 0.15),
+		NumberSequenceKeypoint.new(1, 1)
+	})
+	flash.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, CORE_WHITE),
+		ColorSequenceKeypoint.new(0.25, CORE_WHITE),
+		ColorSequenceKeypoint.new(0.5, OUTER_RED_BRIGHT),
+		ColorSequenceKeypoint.new(1, OUTER_RED)
+	})
+	flash.LightEmission = 1
+	flash.LightInfluence = 0
+	flash.Parent = attachment
+
+	local light = Instance.new("PointLight")
+	light.Name = "LaserHitLight"
+	light.Color = OUTER_RED_BRIGHT
+	light.Brightness = IMPACT_LIGHT_BRIGHTNESS
+	light.Range = IMPACT_LIGHT_RANGE
+	light.Shadows = false
+	light.Parent = impactPart
+
+	local ring = Instance.new("Part")
+	ring.Name = "LaserImpactRing"
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Material = Enum.Material.Neon
+	ring.Color = OUTER_RED_BRIGHT
+	ring.Transparency = 0.1
+	ring.Anchored = true
+	ring.CanCollide = false
+	ring.CanTouch = false
+	ring.CanQuery = false
+	ring.CastShadow = false
+	ring.Size = Vector3.new(0.05, IMPACT_RING_SIZE, IMPACT_RING_SIZE)
+	ring.CFrame = impactPart.CFrame * CFrame.Angles(0, math.rad(90), 0)
+	ring.Parent = workspace
+
+	local debrisFolder = Instance.new("Folder")
+	debrisFolder.Name = "LaserImpactDebris"
+	debrisFolder.Parent = workspace
+
+	for i = 1, IMPACT_DEBRIS_COUNT do
+		local debrisPart = Instance.new("Part")
+		debrisPart.Name = "LaserDebris"
+
+		local debrisSize = math.random(IMPACT_DEBRIS_SIZE_MIN * 1000, IMPACT_DEBRIS_SIZE_MAX * 1000) / 1000
+		debrisPart.Size = Vector3.new(debrisSize, debrisSize, debrisSize)
+		debrisPart.Material = Enum.Material.Neon
+		debrisPart.Color = OUTER_RED_BRIGHT
+		debrisPart.Anchored = false
+		debrisPart.CanCollide = false
+		debrisPart.CanTouch = false
+		debrisPart.CanQuery = false
+		debrisPart.CastShadow = false
+		debrisPart.CFrame = CFrame.new(position)
+		debrisPart.Parent = debrisFolder
+
+		local randomDirection = (normal + Vector3.new(
+			math.random(-100, 100) / 100,
+			math.random(-100, 100) / 100,
+			math.random(-100, 100) / 100
+		)).Unit
+
+		local randomSpeed = math.random(IMPACT_DEBRIS_SPEED_MIN, IMPACT_DEBRIS_SPEED_MAX)
+		debrisPart.AssemblyLinearVelocity = randomDirection * randomSpeed
+
+		local debrisTween = TweenService:Create(
+			debrisPart,
+			TweenInfo.new(IMPACT_DEBRIS_LIFETIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{Transparency = 1, Size = Vector3.new(0.01, 0.01, 0.01)}
+		)
+
+		debrisTween:Play()
+	end
+
+	if not isRoundActive() then
+		impactPart:Destroy()
+		ring:Destroy()
+		debrisFolder:Destroy()
+		return
+	end
+
+	sparks:Emit(IMPACT_SPARK_COUNT)
+	glow:Emit(8)
+	flash:Emit(1)
+
+	local ringTween = TweenService:Create(
+		ring,
+		TweenInfo.new(IMPACT_RING_DURATION, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+		{
+			Size = Vector3.new(0.05, IMPACT_RING_FINAL_SIZE, IMPACT_RING_FINAL_SIZE),
+			Transparency = 1
+		}
+	)
+
+	ringTween:Play()
+
+	Debris:AddItem(impactPart, 0.5)
+	Debris:AddItem(ring, IMPACT_RING_DURATION)
+	Debris:AddItem(debrisFolder, IMPACT_DEBRIS_LIFETIME + 0.1)
+end
+
+LaserImpact.OnClientEvent:Connect(function(hitPosition, hitNormal)
+	if not isRoundActive() or not laserActive or typeof(hitPosition) ~= "Vector3" then
+		return
+	end
+
+	if typeof(hitNormal) ~= "Vector3" then
+		hitNormal = Vector3.new(0, 1, 0)
+	end
+
+	if laserHitLocked then
+		return
+	end
+
+	laserHitLocked = true
+	lockedHitPosition = hitPosition
+	lockedHitNormal = hitNormal
+
+	if endPart and endPart.Parent then
+		endPart.Position = lockedHitPosition
+	end
+
+	local shouldCreateImpact = true
+
+	if lastImpactPosition and (lastImpactPosition - lockedHitPosition).Magnitude < 0.15 then
+		shouldCreateImpact = false
+	end
+
+	if os.clock() - lastImpactTime < 0.05 then
+		shouldCreateImpact = false
+	end
+
+	if shouldCreateImpact then
+		lastImpactPosition = lockedHitPosition
+		lastImpactTime = os.clock()
+		createImpactVFX(lockedHitPosition, lockedHitNormal)
+	end
+end)
+
+local function createLaserEyes()
+	if not isRoundActive() or not character or not head or not isPlayerInArena() or leftBeam or rightBeam then
+		return
+	end
+
+	leftStartAttachment = Instance.new("Attachment")
+	leftStartAttachment.Name = "LeftLaserEye"
+	leftStartAttachment.Position = Vector3.new(-EYE_OFFSET_X, EYE_OFFSET_Y, EYE_OFFSET_Z)
+	leftStartAttachment.Parent = head
+
+	rightStartAttachment = Instance.new("Attachment")
+	rightStartAttachment.Name = "RightLaserEye"
+	rightStartAttachment.Position = Vector3.new(EYE_OFFSET_X, EYE_OFFSET_Y, EYE_OFFSET_Z)
+	rightStartAttachment.Parent = head
+
+	endPart = Instance.new("Part")
+	endPart.Name = "LaserEyesTarget"
+	endPart.Size = Vector3.new(0.2, 0.2, 0.2)
+	endPart.Transparency = 1
+	endPart.Anchored = true
+	endPart.CanCollide = false
+	endPart.CanTouch = false
+	endPart.CanQuery = false
+	endPart.CastShadow = false
+	endPart.Parent = workspace
+
+	endAttachment = Instance.new("Attachment")
+	endAttachment.Name = "LaserEyesTargetAttachment"
+	endAttachment.Parent = endPart
+
+	local function createOuterBeam(name, startAttachment)
+		local beam = Instance.new("Beam")
+		beam.Name = name
+		beam.Attachment0 = startAttachment
+		beam.Attachment1 = endAttachment
+		beam.Width0 = OUTER_BEAM_WIDTH_START
+		beam.Width1 = OUTER_BEAM_WIDTH_END
+		beam.FaceCamera = true
+		beam.LightEmission = 1
+		beam.LightInfluence = 0
+		beam.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, OUTER_RED_BRIGHT),
+			ColorSequenceKeypoint.new(0.5, OUTER_RED),
+			ColorSequenceKeypoint.new(1, OUTER_RED_BRIGHT)
+		})
+		beam.Transparency = NumberSequence.new(0.05)
+		beam.Segments = 10
+
+		if LASER_TEXTURE ~= "" then
+			beam.Texture = LASER_TEXTURE
+			beam.TextureLength = 2
+			beam.TextureSpeed = LASER_TEXTURE_SPEED
+		end
+
+		beam.Enabled = true
+		beam.Parent = head
+		return beam
+	end
+
+	local function createCoreBeam(name, startAttachment)
+		local beam = Instance.new("Beam")
+		beam.Name = name
+		beam.Attachment0 = startAttachment
+		beam.Attachment1 = endAttachment
+		beam.Width0 = CORE_BEAM_WIDTH_START
+		beam.Width1 = CORE_BEAM_WIDTH_END
+		beam.FaceCamera = true
+		beam.LightEmission = 1
+		beam.LightInfluence = 0
+		beam.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, CORE_WHITE),
+			ColorSequenceKeypoint.new(0.5, CORE_WHITE),
+			ColorSequenceKeypoint.new(1, CORE_WHITE_RED)
+		})
+		beam.Transparency = NumberSequence.new(0)
+		beam.Segments = 10
+		beam.Enabled = true
+		beam.Parent = head
+		return beam
+	end
+
+	leftBeam = createOuterBeam("LeftLaserEyeOuterBeam", leftStartAttachment)
+	rightBeam = createOuterBeam("RightLaserEyeOuterBeam", rightStartAttachment)
+	leftCoreBeam = createCoreBeam("LeftLaserEyeWhiteCore", leftStartAttachment)
+	rightCoreBeam = createCoreBeam("RightLaserEyeWhiteCore", rightStartAttachment)
+end
+
+local function activateLaserVisuals(startupToken)
+	if startupToken ~= laserStartupToken or not laserActive or not isRoundActive() or not isPlayerInArena() then
+		return
+	end
+
+	laserVisualActive = true
+	createLaserEyes()
+
+	if not leftBeam or not rightBeam then
+		laserVisualActive = false
+		return
+	end
+
+	playLaserLoopAnimation()
+
+	if laserHitLocked and lockedHitPosition and endPart and endPart.Parent then
+		endPart.Position = lockedHitPosition
+	end
+end
+
+local function getAimPosition()
+	if not mouse or not mouse.Hit then
+		return nil
+	end
+
+	return mouse.Hit.Position
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed or input.UserInputType ~= Enum.UserInputType.Keyboard or input.KeyCode ~= Enum.KeyCode.One then
+		return
+	end
+
+	if laserActive or not isRoundActive() or not isPlayerInArena() or isLocalCooldownActive() then
+		return
+	end
+
+	laserActive = true
+	laserVisualActive = false
+	laserStartTime = os.clock()
+	aimUpdateTimer = 0
+
+	laserHitLocked = false
+	lockedHitPosition = nil
+	lockedHitNormal = nil
+	lastImpactPosition = nil
+	lastImpactTime = 0
+
+	disableAutoRotate()
+
+	laserStartupToken += 1
+	local startupToken = laserStartupToken
+
+	if not playLaserStartAnimation() then
+		laserActive = false
+		restoreAutoRotate()
+		return
+	end
+
+	UseAbility:FireServer("LaserEyes")
+
+	task.delay(LASER_STARTUP_TIME, function()
+		activateLaserVisuals(startupToken)
+	end)
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode ~= Enum.KeyCode.One or not laserActive then
+		return
+	end
+
+	removeLaserEyes(true)
+	UseAbility:FireServer("LaserEyesEnd")
+end)
+
+RunService.RenderStepped:Connect(function(deltaTime)
+	isLocalCooldownActive()
+
+	if not laserActive then
+		return
+	end
+
+	if not isRoundActive() then
+		removeLaserEyes(false)
+		UseAbility:FireServer("LaserEyesEnd")
+		return
+	end
+
+	if not isPlayerInArena() then
+		removeLaserEyes(false)
+		UseAbility:FireServer("LaserEyesEnd")
+		return
+	end
+
+	if os.clock() - laserStartTime >= LASER_DURATION then
+		removeLaserEyes(true)
+		UseAbility:FireServer("LaserEyesEnd")
+		return
+	end
+
+	if not character or not character.Parent or not head or not rootPart or not humanoid then
+		return
+	end
+
+	if humanoid.AutoRotate then
+		humanoid.AutoRotate = false
+	end
+
+	local aimPosition = getAimPosition()
+	if not aimPosition then
+		return
+	end
+
+	if laserVisualActive and endPart and endPart.Parent then
+		if laserHitLocked and lockedHitPosition then
+			endPart.Position = lockedHitPosition
+		else
+			local eyePosition = head.Position
+			local direction = aimPosition - eyePosition
+
+			if direction.Magnitude > 0 then
+				local limitedDirection = direction.Unit * math.min(direction.Magnitude, LASER_MAX_DISTANCE)
+				endPart.Position = eyePosition + limitedDirection
+			end
+		end
+	end
+
+	aimUpdateTimer += deltaTime
+
+	if aimUpdateTimer >= AIM_UPDATE_INTERVAL then
+		aimUpdateTimer = 0
+		UpdateAim:FireServer(aimPosition)
+	end
+
+	local bodyPosition = rootPart.Position
+	local direction = aimPosition - bodyPosition
+
+	if direction.Magnitude > 0.1 then
+		local targetCFrame = CFrame.lookAt(bodyPosition, aimPosition)
+		local alpha = 1 - math.exp(-BODY_TURN_SPEED * deltaTime)
+		alpha = math.clamp(alpha, 0, 1)
+		rootPart.CFrame = rootPart.CFrame:Lerp(targetCFrame, alpha)
+	end
+end)
+
+local function connectDeathHandler()
+	if not humanoid then
+		return
+	end
+
+	humanoid.Died:Connect(function()
+		if laserActive then
+			removeLaserEyes(false)
+			UseAbility:FireServer("LaserEyesEnd")
+		else
+			stopLaserAnimations()
+			restoreAutoRotate()
+		end
+	end)
+end
+
+connectDeathHandler()
+
+player.CharacterAdded:Connect(function()
+	task.wait()
+	connectDeathHandler()
+end)
+
+player:GetAttributeChangedSignal("RoundActive"):Connect(function()
+	if not isRoundActive() then
+		if laserActive then
+			removeLaserEyes(false)
+			UseAbility:FireServer("LaserEyesEnd")
+		else
+			stopLaserAnimations()
+			cleanupLaserObjects()
+			restoreAutoRotate()
+		end
+	end
+end)
