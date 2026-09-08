@@ -1,0 +1,364 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RemoteEvents = ReplicatedStorage:WaitForChild("RemoteEvents")
+local QueueMessage = RemoteEvents:WaitForChild("QueueMessage")
+
+local BindableEvents = ReplicatedStorage:WaitForChild("BindableEvents")
+local MatchReady = BindableEvents:WaitForChild("MatchReady")
+local MatchFinished = BindableEvents:WaitForChild("MatchFinished")
+
+local Lobby = workspace:WaitForChild("Lobby")
+local Pad1 = Lobby:WaitForChild("Pad1")
+local Pad2 = Lobby:WaitForChild("Pad2")
+local ArenasFolder = workspace:WaitForChild("Arenas")
+
+local player1, player2 = nil, nil
+local activeMatchPlayer1, activeMatchPlayer2 = nil, nil
+local activeArena = nil
+local matchInProgress = false
+local countdownRunning = false
+local matchStarting = false
+
+local function sendMessage(player, message)
+	if player and player.Parent then
+		QueueMessage:FireClient(player, message)
+	end
+end
+
+local function clearMessage(player)
+	if player and player.Parent then
+		QueueMessage:FireClient(player, "")
+	end
+end
+
+local function getArenas()
+	return ArenasFolder:GetChildren()
+end
+
+local function getOpenArena()
+	for _, arena in ipairs(getArenas()) do
+		local spawn1 = arena:FindFirstChild("Spawn1")
+		local spawn2 = arena:FindFirstChild("Spawn2")
+		if spawn1 and spawn2 and not arena:GetAttribute("Occupied") then
+			return arena
+		end
+	end
+	return nil
+end
+
+local function prepareArenaSpawns(arena)
+	if not arena then return end
+	local spawn1 = arena:FindFirstChild("Spawn1")
+	local spawn2 = arena:FindFirstChild("Spawn2")
+
+	if spawn1 then
+		spawn1.Anchored = true
+		spawn1.CanCollide = false
+	end
+
+	if spawn2 then
+		spawn2.Anchored = true
+		spawn2.CanCollide = false
+	end
+end
+
+local function teleportCharacter(player, spawnPart)
+	if not player or not player.Parent or not spawnPart then
+		return false
+	end
+
+	local character = player.Character
+	if not character then
+		character = player.CharacterAdded:Wait()
+	end
+	if not character then return false end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
+	if not root then return false end
+
+	character:PivotTo(spawnPart.CFrame + Vector3.new(0, 3, 0))
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	return true
+end
+
+local function cleanupFailedMatch(arena, matchPlayer1, matchPlayer2)
+	if arena then
+		arena:SetAttribute("Occupied", false)
+	end
+
+	for _, player in ipairs({matchPlayer1, matchPlayer2}) do
+		if player and player.Parent then
+			player:SetAttribute("InMatch", false)
+			player:SetAttribute("CurrentArenaName", nil)
+		end
+	end
+
+	if activeMatchPlayer1 == matchPlayer1 then
+		activeMatchPlayer1 = nil
+	end
+
+	if activeMatchPlayer2 == matchPlayer2 then
+		activeMatchPlayer2 = nil
+	end
+
+	if activeArena == arena then
+		activeArena = nil
+	end
+end
+
+local function startMatch()
+	if matchInProgress or matchStarting then
+		return false
+	end
+
+	local matchPlayer1, matchPlayer2 = player1, player2
+	if not matchPlayer1 or not matchPlayer2 then
+		return false
+	end
+
+	if not matchPlayer1.Parent or not matchPlayer2.Parent then
+		return false
+	end
+
+	if matchPlayer1:GetAttribute("InMatch") or matchPlayer2:GetAttribute("InMatch") then
+		return false
+	end
+
+	local arena = getOpenArena()
+	if not arena then
+		sendMessage(matchPlayer1, "No arenas available")
+		sendMessage(matchPlayer2, "No arenas available")
+		return false
+	end
+
+	matchStarting = true
+	activeMatchPlayer1 = matchPlayer1
+	activeMatchPlayer2 = matchPlayer2
+	activeArena = arena
+
+	prepareArenaSpawns(arena)
+	arena:SetAttribute("Occupied", true)
+
+	matchPlayer1:SetAttribute("CurrentArenaName", arena.Name)
+	matchPlayer2:SetAttribute("CurrentArenaName", arena.Name)
+	matchPlayer1:SetAttribute("InMatch", true)
+	matchPlayer2:SetAttribute("InMatch", true)
+
+	local player1Teleported = teleportCharacter(matchPlayer1, arena:FindFirstChild("Spawn1"))
+	local player2Teleported = teleportCharacter(matchPlayer2, arena:FindFirstChild("Spawn2"))
+
+	if not player1Teleported or not player2Teleported then
+		cleanupFailedMatch(arena, matchPlayer1, matchPlayer2)
+		matchInProgress = false
+		matchStarting = false
+		return false
+	end
+
+	matchInProgress = true
+	player1 = nil
+	player2 = nil
+
+	clearMessage(matchPlayer1)
+	clearMessage(matchPlayer2)
+
+	MatchReady:Fire(matchPlayer1, matchPlayer2, arena)
+	matchStarting = false
+
+	return true
+end
+
+local function startCountdown()
+	if countdownRunning or matchInProgress or matchStarting or not player1 or not player2 then
+		return
+	end
+
+	countdownRunning = true
+
+	for i = 5, 1, -1 do
+		if not player1 or not player2 then
+			countdownRunning = false
+			return
+		end
+
+		if not player1.Parent or not player2.Parent then
+			countdownRunning = false
+			return
+		end
+
+		if player1:GetAttribute("InMatch") or player2:GetAttribute("InMatch") then
+			countdownRunning = false
+			return
+		end
+
+		sendMessage(player1, "Starting match\n" .. i)
+		sendMessage(player2, "Starting match\n" .. i)
+
+		task.wait(1)
+	end
+
+	if not player1 or not player2 or not player1.Parent or not player2.Parent then
+		countdownRunning = false
+		return
+	end
+
+	if matchInProgress or matchStarting then
+		countdownRunning = false
+		return
+	end
+
+	startMatch()
+	countdownRunning = false
+end
+
+local function updateQueue()
+	if matchInProgress or matchStarting then
+		return
+	end
+
+	if player1 and player2 then
+		task.spawn(startCountdown)
+		return
+	end
+
+	if player1 then
+		sendMessage(player1, "Waiting for players...")
+	end
+
+	if player2 then
+		sendMessage(player2, "Waiting for players...")
+	end
+end
+
+local function checkPadStatus()
+	while true do
+		task.wait(0.2)
+
+		if matchInProgress or matchStarting then
+			continue
+		end
+
+		if player1 then
+			local character = player1.Character
+			if character and character.PrimaryPart then
+				local distance = (character.PrimaryPart.Position - Pad1.Position).Magnitude
+				if distance > 8 then
+					local leavingPlayer = player1
+					player1 = nil
+					clearMessage(leavingPlayer)
+					updateQueue()
+				end
+			end
+		end
+
+		if player2 then
+			local character = player2.Character
+			if character and character.PrimaryPart then
+				local distance = (character.PrimaryPart.Position - Pad2.Position).Magnitude
+				if distance > 8 then
+					local leavingPlayer = player2
+					player2 = nil
+					clearMessage(leavingPlayer)
+					updateQueue()
+				end
+			end
+		end
+	end
+end
+
+MatchFinished.Event:Connect(function(finishedPlayer1, finishedPlayer2, finishedArena)
+	if finishedPlayer1 ~= activeMatchPlayer1 or finishedPlayer2 ~= activeMatchPlayer2 then
+		return
+	end
+
+	local arenaToRelease = finishedArena or activeArena
+
+	if arenaToRelease and arenaToRelease.Parent then
+		arenaToRelease:SetAttribute("Occupied", false)
+	end
+
+	for _, player in ipairs({finishedPlayer1, finishedPlayer2}) do
+		if player and player.Parent then
+			player:SetAttribute("InMatch", false)
+			player:SetAttribute("CurrentArenaName", nil)
+		end
+	end
+
+	activeMatchPlayer1 = nil
+	activeMatchPlayer2 = nil
+	activeArena = nil
+	matchInProgress = false
+	matchStarting = false
+	countdownRunning = false
+end)
+
+task.spawn(checkPadStatus)
+
+Pad1.Touched:Connect(function(hit)
+	if matchInProgress or matchStarting then
+		return
+	end
+
+	local character = hit.Parent
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	local player = Players:GetPlayerFromCharacter(character)
+	if not player or player:GetAttribute("InMatch") or player == player2 then
+		return
+	end
+
+	if not player1 then
+		player1 = player
+		updateQueue()
+	end
+end)
+
+Pad2.Touched:Connect(function(hit)
+	if matchInProgress or matchStarting then
+		return
+	end
+
+	local character = hit.Parent
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	local player = Players:GetPlayerFromCharacter(character)
+	if not player or player:GetAttribute("InMatch") or player == player1 then
+		return
+	end
+
+	if not player2 then
+		player2 = player
+		updateQueue()
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	local wasInQueue = player == player1 or player == player2
+
+	if player == player1 then
+		player1 = nil
+	end
+
+	if player == player2 then
+		player2 = nil
+	end
+
+	clearMessage(player)
+
+	if wasInQueue then
+		updateQueue()
+	end
+end)
