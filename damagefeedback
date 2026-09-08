@@ -1,0 +1,337 @@
+--!strict
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+local damageFeedbackRemote: RemoteEvent =
+	Remotes.DamageFeedback
+
+local DAMAGE_NUMBER_DURATION = 0.7
+local HIGHLIGHT_DURATION = 0.2
+
+local localPlayer =
+	Players.LocalPlayer
+
+local function formatDamage(damage: number): string
+	if damage % 1 == 0 then
+		return tostring(math.floor(damage))
+	end
+
+	return string.format("%.1f", damage)
+end
+
+local function showDamageNumber(
+	character: Model,
+	damage: number
+)
+	if not character:IsDescendantOf(workspace) then
+		return
+	end
+
+	local head =
+		character:FindFirstChild("Head")
+
+	local root =
+		character:FindFirstChild("HumanoidRootPart")
+
+	local adornee =
+		head or root
+
+	if not adornee
+		or not adornee:IsA("BasePart")
+	then
+		return
+	end
+
+	local billboard =
+		Instance.new("BillboardGui")
+
+	billboard.Name =
+		"DamageNumber"
+
+	billboard.Adornee =
+		adornee
+
+	billboard.AlwaysOnTop =
+		true
+
+	billboard.Size =
+		UDim2.fromOffset(
+			120,
+			50
+		)
+
+	billboard.StudsOffset =
+		Vector3.new(
+			math.random(-8, 8) / 10,
+			3,
+			math.random(-5, 5) / 10
+		)
+
+	billboard.Parent =
+		character
+
+	local label =
+		Instance.new("TextLabel")
+
+	label.BackgroundTransparency =
+		1
+
+	label.Size =
+		UDim2.fromScale(
+			1,
+			1
+		)
+
+	label.Text =
+		formatDamage(damage)
+
+	label.TextColor3 =
+		Color3.fromRGB(
+			255,
+			0,
+			0
+		)
+
+	label.TextScaled =
+		true
+
+	label.FontFace =
+		Font.new(
+			"rbxasset://fonts/families/Montserrat.json",
+			Enum.FontWeight.Bold,
+			Enum.FontStyle.Normal
+		)
+
+	label.Parent =
+		billboard
+
+	local stroke =
+		Instance.new("UIStroke")
+
+	stroke.Color =
+		Color3.fromRGB(
+			0,
+			0,
+			0
+		)
+
+	stroke.Thickness =
+		2
+
+	stroke.Transparency =
+		0
+
+	stroke.Parent =
+		label
+
+	local scale =
+		Instance.new("UIScale")
+
+	scale.Scale =
+		0.8
+
+	scale.Parent =
+		label
+
+	local startOffset =
+		billboard.StudsOffset
+
+	local movementTween =
+		TweenService:Create(
+			billboard,
+			TweenInfo.new(
+				DAMAGE_NUMBER_DURATION,
+				Enum.EasingStyle.Quad,
+				Enum.EasingDirection.Out
+			),
+			{
+				StudsOffset =
+				startOffset
+				+ Vector3.new(
+					math.random(-10, 10) / 10,
+					2.5,
+					math.random(-5, 5) / 10
+				)
+			}
+		)
+
+	local fadeTween =
+		TweenService:Create(
+			label,
+			TweenInfo.new(
+				DAMAGE_NUMBER_DURATION,
+				Enum.EasingStyle.Quad,
+				Enum.EasingDirection.Out
+			),
+			{
+				TextTransparency =
+				1
+			}
+		)
+
+	local strokeFadeTween =
+		TweenService:Create(
+			stroke,
+			TweenInfo.new(
+				DAMAGE_NUMBER_DURATION,
+				Enum.EasingStyle.Quad,
+				Enum.EasingDirection.Out
+			),
+			{
+				Transparency =
+				1
+			}
+		)
+
+	local scaleTween =
+		TweenService:Create(
+			scale,
+			TweenInfo.new(
+				DAMAGE_NUMBER_DURATION,
+				Enum.EasingStyle.Back,
+				Enum.EasingDirection.Out
+			),
+			{
+				Scale =
+				1.15
+			}
+		)
+
+	movementTween:Play()
+	fadeTween:Play()
+	strokeFadeTween:Play()
+	scaleTween:Play()
+
+	task.delay(
+		DAMAGE_NUMBER_DURATION,
+		function()
+			if billboard.Parent then
+				billboard:Destroy()
+			end
+		end
+	)
+end
+
+local function showHitHighlight(
+	character: Model
+)
+	if not character:IsDescendantOf(workspace) then
+		return
+	end
+
+	local existing =
+		character:FindFirstChild(
+			"DamageHitHighlight"
+		)
+
+	if existing then
+		existing:Destroy()
+	end
+
+	local highlight =
+		Instance.new("Highlight")
+
+	highlight.Name =
+		"DamageHitHighlight"
+
+	highlight.Adornee =
+		character
+
+	highlight.FillColor =
+		Color3.fromRGB(
+			255,
+			0,
+			0
+		)
+
+	highlight.OutlineColor =
+		Color3.fromRGB(
+			255,
+			0,
+			0
+		)
+
+	highlight.FillTransparency =
+		0.45
+
+	highlight.OutlineTransparency =
+		0
+
+	highlight.DepthMode =
+		Enum.HighlightDepthMode.AlwaysOnTop
+
+	highlight.Parent =
+		character
+
+	local tween =
+		TweenService:Create(
+			highlight,
+			TweenInfo.new(
+				HIGHLIGHT_DURATION,
+				Enum.EasingStyle.Quad,
+				Enum.EasingDirection.Out
+			),
+			{
+				FillTransparency =
+				1,
+
+				OutlineTransparency =
+				1
+			}
+		)
+
+	tween:Play()
+
+	task.delay(
+		HIGHLIGHT_DURATION,
+		function()
+			if highlight.Parent then
+				highlight:Destroy()
+			end
+		end
+	)
+end
+
+damageFeedbackRemote.OnClientEvent:Connect(
+	function(
+		attacker: Player,
+		targetCharacter: Model,
+		damage: number
+	)
+		if attacker ~= localPlayer then
+			return
+		end
+
+		if typeof(targetCharacter) ~= "Instance"
+			or not targetCharacter:IsA("Model")
+		then
+			return
+		end
+
+		if targetCharacter ==
+			localPlayer.Character
+		then
+			return
+		end
+
+		if typeof(damage) ~= "number"
+			or damage <= 0
+		then
+			return
+		end
+
+		showDamageNumber(
+			targetCharacter,
+			damage
+		)
+
+		showHitHighlight(
+			targetCharacter
+		)
+	end
+)
