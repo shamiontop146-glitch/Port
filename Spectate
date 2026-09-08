@@ -1,0 +1,429 @@
+--!strict
+
+local Players = game:GetService("Players")
+
+local localPlayer = Players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
+
+local spectateFrame = script.Parent
+
+local exitButton =
+	spectateFrame:WaitForChild("ExitSpectate") :: ImageButton
+
+local nextButton =
+	spectateFrame:WaitForChild("Next") :: TextButton
+
+local previousButton =
+	spectateFrame:WaitForChild("Previous") :: TextButton
+
+local playerNameLabel =
+	spectateFrame:WaitForChild("PlayerName") :: TextLabel
+
+local roundGui =
+	playerGui:FindFirstChild("RoundGUI")
+
+local abilityGui: GuiObject? = nil
+
+if roundGui then
+	local abilityFrame =
+		roundGui:FindFirstChild("Ability")
+
+	if abilityFrame
+		and abilityFrame:IsA("GuiObject")
+	then
+		abilityGui = abilityFrame
+	end
+end
+
+local spectateTargets: {Player} = {}
+local spectateIndex = 0
+local currentTarget: Player? = nil
+local isSpectating = false
+local savedAbilityVisible = true
+
+local function setDefaultState()
+	spectateIndex = 0
+	currentTarget = nil
+	isSpectating = false
+	playerNameLabel.Text = "Spectate"
+end
+
+local function setAbilityVisibility(
+	visible: boolean
+)
+	if not abilityGui then
+		return
+	end
+
+	abilityGui.Visible = visible
+end
+
+local function rebuildTargets()
+	spectateTargets = {}
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= localPlayer
+			and player:GetAttribute("InMatch") == true
+		then
+			local character =
+				player.Character
+
+			if character then
+				local humanoid =
+					character:FindFirstChildOfClass(
+						"Humanoid"
+					)
+
+				if humanoid
+					and humanoid.Health > 0
+				then
+					table.insert(
+						spectateTargets,
+						player
+					)
+				end
+			end
+		end
+	end
+end
+
+local function getHumanoid(
+	player: Player
+): Humanoid?
+	local character =
+		player.Character
+
+	if not character then
+		return nil
+	end
+
+	local humanoid =
+		character:FindFirstChildOfClass(
+			"Humanoid"
+		)
+
+	if not humanoid then
+		return nil
+	end
+
+	if humanoid.Health <= 0 then
+		return nil
+	end
+
+	return humanoid
+end
+
+local function restoreOwnCamera()
+	local character =
+		localPlayer.Character
+
+	local humanoid =
+		character
+		and character:FindFirstChildOfClass(
+			"Humanoid"
+		)
+
+	camera.CameraType =
+		Enum.CameraType.Custom
+
+	if humanoid then
+		camera.CameraSubject =
+			humanoid
+	end
+end
+
+local function stopSpectating()
+	restoreOwnCamera()
+
+	currentTarget = nil
+	spectateIndex = 0
+	isSpectating = false
+	playerNameLabel.Text = "Spectate"
+
+	setAbilityVisibility(
+		savedAbilityVisible
+	)
+end
+
+local function spectatePlayer(
+	player: Player
+): boolean
+	local humanoid =
+		getHumanoid(player)
+
+	if not humanoid then
+		return false
+	end
+
+	camera.CameraType =
+		Enum.CameraType.Custom
+
+	camera.CameraSubject =
+		humanoid
+
+	currentTarget = player
+	isSpectating = true
+
+	playerNameLabel.Text =
+		player.Name
+
+	if abilityGui then
+		savedAbilityVisible =
+			abilityGui.Visible
+	end
+
+	setAbilityVisibility(false)
+
+	return true
+end
+
+local function findTarget(
+	direction: number
+)
+	rebuildTargets()
+
+	if #spectateTargets == 0 then
+		stopSpectating()
+		return
+	end
+
+	local targetIndex =
+		spectateIndex
+
+	if direction > 0 then
+		if targetIndex < 1 then
+			targetIndex = 0
+		end
+	elseif direction < 0 then
+		if targetIndex < 1 then
+			targetIndex =
+				#spectateTargets + 1
+		end
+	end
+
+	local attempts = 0
+
+	while attempts < #spectateTargets do
+		attempts += 1
+
+		targetIndex += direction
+
+		if targetIndex > #spectateTargets then
+			targetIndex = 1
+		elseif targetIndex < 1 then
+			targetIndex =
+				#spectateTargets
+		end
+
+		local target =
+			spectateTargets[targetIndex]
+
+		if spectatePlayer(target) then
+			spectateIndex =
+				targetIndex
+
+			return
+		end
+
+		rebuildTargets()
+
+		if #spectateTargets == 0 then
+			stopSpectating()
+			return
+		end
+
+		if targetIndex > #spectateTargets then
+			targetIndex =
+				#spectateTargets
+		end
+	end
+
+	stopSpectating()
+end
+
+local function updateButtonState()
+	rebuildTargets()
+
+	local hasTargets =
+		#spectateTargets > 0
+
+	nextButton.Active =
+		hasTargets
+
+	previousButton.Active =
+		hasTargets
+
+	nextButton.AutoButtonColor =
+		hasTargets
+
+	previousButton.AutoButtonColor =
+		hasTargets
+end
+
+local function updateVisibility()
+	local inMatch =
+		localPlayer:GetAttribute("InMatch") == true
+
+	if inMatch then
+		spectateFrame.Visible = false
+
+		if isSpectating then
+			stopSpectating()
+		else
+			restoreOwnCamera()
+		end
+
+		return
+	end
+
+	spectateFrame.Visible = true
+
+	if not isSpectating then
+		playerNameLabel.Text =
+			"Spectate"
+
+		setAbilityVisibility(
+			savedAbilityVisible
+		)
+	end
+
+	updateButtonState()
+end
+
+nextButton.Activated:Connect(function()
+	if localPlayer:GetAttribute("InMatch") == true then
+		return
+	end
+
+	findTarget(1)
+end)
+
+previousButton.Activated:Connect(function()
+	if localPlayer:GetAttribute("InMatch") == true then
+		return
+	end
+
+	findTarget(-1)
+end)
+
+exitButton.Activated:Connect(function()
+	if localPlayer:GetAttribute("InMatch") == true then
+		stopSpectating()
+		spectateFrame.Visible = false
+		return
+	end
+
+	stopSpectating()
+	spectateFrame.Visible = true
+	updateButtonState()
+end)
+
+Players.PlayerAdded:Connect(function(player)
+	player:GetAttributeChangedSignal(
+		"InMatch"
+	):Connect(function()
+		updateButtonState()
+
+		if currentTarget == player
+			and player:GetAttribute("InMatch") ~= true
+		then
+			findTarget(1)
+		end
+	end)
+
+	player.CharacterAdded:Connect(function()
+		task.defer(function()
+			updateButtonState()
+
+			if currentTarget == player
+				and not getHumanoid(player)
+			then
+				findTarget(1)
+			end
+		end)
+	end)
+
+	updateButtonState()
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	local wasCurrentTarget =
+		currentTarget == player
+
+	rebuildTargets()
+
+	if wasCurrentTarget then
+		findTarget(1)
+	else
+		if spectateIndex > #spectateTargets then
+			spectateIndex = 0
+		end
+
+		updateButtonState()
+	end
+end)
+
+localPlayer:GetAttributeChangedSignal(
+	"InMatch"
+):Connect(function()
+	updateVisibility()
+end)
+
+localPlayer.CharacterAdded:Connect(function()
+	task.wait(0.2)
+
+	if localPlayer:GetAttribute("InMatch") == true then
+		stopSpectating()
+		spectateFrame.Visible = false
+	else
+		restoreOwnCamera()
+		updateVisibility()
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(0.25)
+
+		if isSpectating then
+			local target =
+				currentTarget
+
+			if not target
+				or target.Parent ~= Players
+				or target:GetAttribute("InMatch") ~= true
+				or not getHumanoid(target)
+			then
+				findTarget(1)
+			end
+		end
+
+		if localPlayer:GetAttribute("InMatch") == true then
+			if spectateFrame.Visible then
+				spectateFrame.Visible = false
+			end
+
+			if isSpectating then
+				stopSpectating()
+			end
+		else
+			if not spectateFrame.Visible then
+				spectateFrame.Visible = true
+			end
+
+			updateButtonState()
+		end
+	end
+end)
+
+rebuildTargets()
+setDefaultState()
+
+if abilityGui then
+	savedAbilityVisible =
+		abilityGui.Visible
+end
+
+restoreOwnCamera()
+updateVisibility()
